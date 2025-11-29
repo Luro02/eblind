@@ -1,0 +1,12 @@
+baudrate = 460800
+partition_table = "partitions.csv"
+
+[connection]
+
+[[usb_device]]
+vid = "303a"
+pid = "1001"
+
+[flash]
+size = "4MB"
+frequency = "80MHz"

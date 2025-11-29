@@ -1,0 +1,89 @@
+[package]
+name = "blind-firmware"
+version = "0.1.0"
+authors = ["Luro02 <24826124+Luro02@users.noreply.github.com>"]
+edition = "2021"
+resolver = "3"
+rust-version = "1.84"
+
+[profile.release]
+#opt-level = "2"
+opt-level = "z" # TODO: switch back to s?
+#lto="thin"
+strip="none"
+debug = true
+
+[profile.dev]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "z"
+
+[[bin]]
+name = "blind-firmware"
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[dependencies]
+log = "0.4"
+anyhow = "1"
+thiserror = "1"
+
+embedded-io = "0.6"
+embedded-io-async = "0.6"
+
+embassy-time = "0.5"
+embassy-executor = { version = "0.9", features = [] }
+embassy-futures = "0.1"
+embassy-sync = { version = "0.7", features = [] }
+
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "dc79421" }
+
+smart-leds = "0.4.0"
+ws2812-spi = "0.5.1"
+button-driver = { version = "0.2.3", features = ["std", "embassy", "embedded_hal"] }
+static_cell = "2"
+
+# This is used to read environment variables at compile-time to configure the project
+const-dotenvy = "0.1"
+
+tmc2209 = { git = "https://github.com/Luro02/tmc2209" }
+bincode = { version = "2", features = [] }
+
+[dependencies.esp-idf-hal]
+# git = "https://github.com/esp-rs/esp-idf-hal.git"
+# rev = "782df6e"
+git = "https://github.com/Luro02/esp-idf-hal.git"
+features = ["critical-section"]
+
+[dependencies.esp-idf-matter]
+git = "https://github.com/sysgrok/esp-idf-matter.git"
+#rev = "c1d3583"
+#path = "../esp-idf-matter"
+
+[dependencies.rs-matter]
+git = "https://github.com/project-chip/rs-matter"
+#branch = "next"
+#rev = "7502006"
+default-features = false
+features = ["std", "backtrace", "rustcrypto", "log"]
+
+[dependencies.esp-idf-svc]
+git = "https://github.com/esp-rs/esp-idf-svc.git"
+#rev = "9e140c1"
+rev = "3c45357"
+features = ["embassy-time-driver", "embassy-sync", "experimental"]
+
+[patch.crates-io]
+#rs-matter = { git = "https://github.com/sysgrok/rs-matter.git", branch = "next" }
+rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+#rs-matter-stack = { path = "../rs-matter-stack" }
+rs-matter-stack = { git = "https://github.com/sysgrok/rs-matter-stack" }
+#rs-matter-stack = { path = "../esp-idf-matter" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", rev = "3c45357" }
+#esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git", rev = "782df6e" }
+esp-idf-hal = { git = "https://github.com/Luro02/esp-idf-hal.git" }
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "dc79421" }
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[build-dependencies]
+embuild = "0.33"
