@@ -1,11 +1,10 @@
-use core::time::Duration;
-
-use embassy_time::Duration as EmbassyDuration;
-
-use esp_idf_svc::hal::gpio::{AnyIOPin, InputPin, Output, OutputPin, PinDriver};
-use esp_idf_svc::hal::uart::config;
-use esp_idf_svc::hal::uart::Uart;
-use esp_idf_svc::hal::units::Hertz;
+use embassy_time::Duration;
+use esp_hal::Async;
+use esp_hal::gpio::{AnyPin, Output};
+use esp_hal::time::Rate;
+use esp_hal::uart::{
+    Config as UartConfig, DataBits, Instance as UartInstance, Parity, RxConfig, StopBits, Uart,
+};
 
 use crate::tmc2209_helper::{
     constrain, default_map, send_and_await_read, send_write, send_write_request,
@@ -16,7 +15,7 @@ use tmc2209::reg::{self, Map, WritableRegister};
 use tmc2209::{ReadableRegister, WriteRequest};
 
 use crate::environment::Environment;
-use crate::utils::{yield_for, AsyncUartDriver};
+use crate::utils::yield_for;
 
 const SEMIN_MIN: u8 = 1;
 const SEMIN_MAX: u8 = 15;
@@ -27,40 +26,39 @@ const SEMAX_MAX: u8 = 15;
 pub struct StepperDriver<'d> {
     is_enabled: bool,
     is_setup: bool,
-    uart: AsyncUartDriver<'d>,
-    en_pin: PinDriver<'d, Output>,
+    uart: Uart<'d, Async>,
+    en_pin: Output<'d>,
     map: Map,
     serial_address: u8,
 }
 
 impl<'d> StepperDriver<'d> {
     /// Constructs a communication channel over UART with the stepper driver.
-    pub fn new<UART: Uart + 'd>(
-        baudrate: Hertz,
-        uart: UART,
-        tx: impl OutputPin + 'd,
-        rx: impl InputPin + 'd,
-        enable_pin: impl InputPin + OutputPin + 'd,
+    pub fn new(
+        baudrate: Rate,
+        uart: impl UartInstance + 'static,
+        tx: AnyPin<'static>,
+        rx: AnyPin<'static>,
+        mut en_pin: Output<'d>,
     ) -> anyhow::Result<Self> {
-        let config = config::Config::new()
-            .data_bits(config::DataBits::DataBits8)
-            .parity_none()
-            .stop_bits(config::StopBits::STOP1)
-            .baudrate(baudrate);
+        let config = UartConfig::default()
+            .with_data_bits(DataBits::_8)
+            .with_parity(Parity::None)
+            .with_stop_bits(StopBits::_1)
+            .with_baudrate(baudrate.as_hz())
+            // TODO: For some reason the FIFO overflows...
+            // TODO: The 7 bytes won't save this, seems like we have to buffer more on our side or include an interrupt
+            .with_rx(RxConfig::default().with_fifo_full_threshold(120));
 
-        let uart = AsyncUartDriver::new(
-            uart,
-            tx,
-            rx,
-            AnyIOPin::none(),
-            AnyIOPin::none(),
-            EmbassyDuration::from_millis(400),
-            &config,
-        )?;
+        // TODO: Old code had a timeout of 400ms, this got lost, because the old wrapper is no longer used
+        //let uart = BufferedUart::new(Uart::new(uart, config)?.with_tx(tx).with_rx(rx));
 
-        let mut en_pin = PinDriver::output(enable_pin)?;
+        let uart = Uart::new(uart, config)?
+            .with_tx(tx)
+            .with_rx(rx)
+            .into_async();
 
-        en_pin.set_high()?; // Disable driver initially
+        en_pin.set_high(); // Disable driver initially
 
         Ok(Self {
             is_enabled: false,
@@ -90,7 +88,7 @@ impl<'d> StepperDriver<'d> {
             return Ok(());
         }
 
-        self.en_pin.set_high()?;
+        self.en_pin.set_high();
         self.is_enabled = false;
         self.map.chopconf_mut().set_toff(0);
         send_write(self.serial_address, *self.map.chopconf(), &mut self.uart).await?;
@@ -116,7 +114,7 @@ impl<'d> StepperDriver<'d> {
     pub async fn read_register<R: ReadableRegister + Copy + 'static>(
         &mut self,
     ) -> anyhow::Result<R> {
-        let result = send_and_await_read::<_, R>(self.serial_address, &mut self.uart).await?;
+        let result = send_and_await_read::<R>(self.serial_address, &mut self.uart).await?;
 
         self.map.set_state(result.into());
 
@@ -153,7 +151,7 @@ impl<'d> StepperDriver<'d> {
             }
 
             send_write_request(
-                WriteRequest::try_from_state(self.serial_address as u8, *state).unwrap(),
+                WriteRequest::try_from_state(self.serial_address, *state).unwrap(),
                 &mut self.uart,
             )
             .await?;
@@ -239,9 +237,9 @@ impl<'d> StepperDriver<'d> {
 
     fn actual_set_enable(&mut self, is_enabled: bool) -> anyhow::Result<()> {
         if is_enabled {
-            self.en_pin.set_low()?;
+            self.en_pin.set_low();
         } else {
-            self.en_pin.set_high()?;
+            self.en_pin.set_high();
         }
 
         self.is_enabled = is_enabled;

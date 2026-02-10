@@ -1,89 +1,114 @@
 [package]
-name = "blind-firmware"
+edition = "2024"
+name = "eblind"
+rust-version = "1.88"
 version = "0.1.0"
-authors = ["Luro02 <24826124+Luro02@users.noreply.github.com>"]
-edition = "2021"
-resolver = "3"
-rust-version = "1.84"
-
-[profile.release]
-#opt-level = "2"
-opt-level = "z" # TODO: switch back to s?
-#lto="thin"
-strip="none"
-debug = true
-
-[profile.dev]
-debug = true    # Symbols are nice and they don't increase the size on Flash
-opt-level = "z"
 
 [[bin]]
-name = "blind-firmware"
+name = "eblind"
+path = "./src/bin/main.rs"
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[lib]
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [dependencies]
-log = "0.4"
-anyhow = "1"
-thiserror = "1"
+esp-hal = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413", features = ["log-04", "esp32s3", "unstable"] }
 
-embedded-io = "0.6"
-embedded-io-async = "0.6"
+esp-rtos = { version = "0.2.0", features = [
+  "log-04",
+  "embassy",
+  "esp-alloc",
+  "esp32s3",
+  "esp-radio"
+] }
 
-embassy-time = "0.5"
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["log-04", "esp32s3"] }
+
 embassy-executor = { version = "0.9", features = [] }
+embassy-time = { version = "0.5", features = [] }
 embassy-futures = "0.1"
 embassy-sync = { version = "0.7", features = [] }
 
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "dc79421" }
+esp-alloc = { version = "0.9.0", features = [] }
+esp-storage = { version = "0.8", features = ["esp32s3"] }
+esp-backtrace = { version = "0.18.1", features = [
+  "esp32s3",
+  "panic-handler",
+  "println"
+] }
+esp-println = { version = "0.16.1", features = ["log-04", "esp32s3"] }
+
+esp-metadata-generated = "*"
+# To allow debug printing of registers
+esp32s3 = { version = "*", features = ["impl-register-debug"] }
+
+critical-section = "1.2.0"
+
+embedded-io = "0.7"
+embedded-io-async = "0.7"
+
+log = "0.4"
+anyhow = { version = "1", default-features = false }
+thiserror = { version = "2", default-features = false }
+static_cell = "2"
 
 smart-leds = "0.4.0"
-ws2812-spi = "0.5.1"
-button-driver = { version = "0.2.3", features = ["std", "embassy", "embedded_hal"] }
-static_cell = "2"
+ws2812-spi = { version = "0.5.1", features = ["mosi_idle_high"] }
+button-driver = { version = "0.2.3", features = ["embassy", "embedded_hal"] }
 
 # This is used to read environment variables at compile-time to configure the project
 const-dotenvy = "0.1"
 
-tmc2209 = { git = "https://github.com/Luro02/tmc2209" }
-bincode = { version = "2", features = [] }
-
-[dependencies.esp-idf-hal]
-# git = "https://github.com/esp-rs/esp-idf-hal.git"
-# rev = "782df6e"
-git = "https://github.com/Luro02/esp-idf-hal.git"
-features = ["critical-section"]
-
-[dependencies.esp-idf-matter]
-git = "https://github.com/sysgrok/esp-idf-matter.git"
-#rev = "c1d3583"
-#path = "../esp-idf-matter"
-
-[dependencies.rs-matter]
-git = "https://github.com/project-chip/rs-matter"
-#branch = "next"
-#rev = "7502006"
-default-features = false
-features = ["std", "backtrace", "rustcrypto", "log"]
-
-[dependencies.esp-idf-svc]
-git = "https://github.com/esp-rs/esp-idf-svc.git"
-#rev = "9e140c1"
-rev = "3c45357"
-features = ["embassy-time-driver", "embassy-sync", "experimental"]
+tmc2209 = "0.3"
+bincode = { version = "2", default-features = false, features = ["alloc", "derive"] }
+embassy-embedded-hal = { version = "0.5", features = [] }
+lazy_static = { version = "1", features = ["spin_no_std"] }
+enumset = "1"
+esp-nvs = { version = "0.2", features = ["esp32s3"] }
+rs-matter-embassy = { git = "https://github.com/sysgrok/rs-matter-embassy", rev = "efe713d", features = ["embassy-net", "esp", "log"] }
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next", default-features = false, features = ["backtrace", "log"] }
+esp-radio = { version = "*", features = ["esp32s3", "log-04", "unstable"] }
+embedded-storage = "0.3.1"
 
 [patch.crates-io]
-#rs-matter = { git = "https://github.com/sysgrok/rs-matter.git", branch = "next" }
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
-#rs-matter-stack = { path = "../rs-matter-stack" }
-rs-matter-stack = { git = "https://github.com/sysgrok/rs-matter-stack" }
-#rs-matter-stack = { path = "../esp-idf-matter" }
-esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git", rev = "3c45357" }
-#esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git", rev = "782df6e" }
-esp-idf-hal = { git = "https://github.com/Luro02/esp-idf-hal.git" }
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys", rev = "dc79421" }
+# TODO: Update these to published versions once they are available on crates.io
+#
+# There have been a lot of changes in the esp-hal code since the last release (1.0.0),
+# which is why this project is targeting the git version of esp-hal instead of the latest
+# published version.
+#
+# esp-hal consists of a lot of different crates, and there can be problems if some of them
+# are from crates.io and some are from git. To avoid this, we patch all of the esp-hal
+# crates to use the git version.
+esp-alloc = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+#esp-backtrace = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+#esp-config = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-hal = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-rtos = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+xtensa-lx = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+xtensa-lx-rt = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-sync = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+#esp-radio = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+esp-phy = { git = "https://github.com/esp-rs/esp-hal", rev = "01e9413" }
+# rs-matter and its related crates are currently not published on crates.io, or have not been
+# updated in a long time. Therefore they are also patched to use the git version.
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+rs-matter-stack = { git = "https://github.com/sysgrok/rs-matter-stack.git", branch = "next" }
+openthread = { git = "https://github.com/sysgrok/openthread.git", branch = "next" }
 
-[dev-dependencies]
-pretty_assertions = "1"
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
 
-[build-dependencies]
-embuild = "0.33"
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+#lto = 'fat' # TODO: errors with failed to load esp-wifi-sys bitcode
+opt-level = 's'
+overflow-checks = false

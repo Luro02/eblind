@@ -8,5 +8,3 @@ vid = "303a"
 pid = "1001"
 
 [flash]
-size = "4MB"
-frequency = "80MHz"

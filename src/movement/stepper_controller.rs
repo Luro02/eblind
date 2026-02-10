@@ -1,24 +1,30 @@
-use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
-use esp_idf_hal::gpio::{AnyInputPin, InputOutput, InputPin, OutputPin, PinDriver, Pull};
-use esp_idf_hal::pcnt::config::{
-    ChannelConfig, ChannelEdgeAction, ChannelLevelAction, GlitchFilterConfig, UnitConfig,
-};
-use esp_idf_hal::pcnt::PcntUnitDriver;
-use esp_idf_hal::rmt::config::{Loop, TransmitConfig};
-use esp_idf_hal::rmt::{PinState, Pulse, PulseTicks, Symbol};
+use core::cell::RefCell;
+use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use bincode::{Decode, Encode};
+use critical_section::Mutex;
+
+use esp_hal::clock::Clocks;
+use esp_hal::gpio::interconnect::{InputSignal, PeripheralInput};
+use esp_hal::gpio::{AnyPin, Flex, Level, Output, OutputConfig};
+use esp_hal::interrupt::Priority;
+use esp_hal::pcnt::Pcnt;
+use esp_hal::pcnt::channel::{CtrlMode, EdgeMode};
+use esp_hal::pcnt::unit::{self, Unit};
+use esp_hal::peripherals::{PCNT, RMT};
+use esp_hal::ram;
+use esp_hal::rmt::{PulseCode, TxChannelConfig};
+use esp_hal::time::Rate;
+use esp_hal::uart::Instance as UartInstance;
 
 use crate::environment::Environment;
 use crate::matter::Position;
-use crate::movement::custom_tx_driver::CustomTxChannelDriver;
+use crate::movement::rmt::TxDriver;
 use crate::movement::stepper_driver::StepperDriver;
 use crate::storage::Storage;
-use crate::utils::split_pin;
+
+// TODO: UnitPosition can be simplified
 
 #[derive(Debug, Default)]
 pub struct UnitPosition {
@@ -46,7 +52,7 @@ impl<C> Decode<C> for UnitPosition {
 }
 
 impl UnitPosition {
-    pub fn new(value: usize) -> Self {
+    pub const fn new(value: usize) -> Self {
         Self {
             value: AtomicUsize::new(value),
         }
@@ -100,106 +106,144 @@ impl fmt::Display for UnitPosition {
     }
 }
 
-const PCNT_LOW_LIMIT: i32 = -(i16::MAX as i32);
-const PCNT_HIGH_LIMIT: i32 = -PCNT_LOW_LIMIT;
+const PCNT_LOW_LIMIT: i16 = -i16::MAX;
+const PCNT_HIGH_LIMIT: i16 = -PCNT_LOW_LIMIT;
 
 /// Type to control a stepper motor.
 pub struct StepperController<'d> {
-    current_position: Arc<UnitPosition>,
+    current_position: &'d UnitPosition,
     max_position: UnitPosition,
     target: Option<UnitPosition>,
     stepper_driver: StepperDriver<'d>,
-    pcnt: PcntUnitDriver<'d>,
-    tx_driver: CustomTxChannelDriver<'d>,
+    tx_driver: TxDriver<'d>,
     has_position: bool,
-    dir_pin: PinDriver<'d, InputOutput>,
+    dir_pin: Output<'d>,
 }
 
-fn build_pcnt<'d>(
-    step_pin: Option<impl InputPin + 'd>,
-    dir_pin: Option<impl InputPin + 'd>,
-    current_position: Arc<UnitPosition>,
-) -> anyhow::Result<PcntUnitDriver<'d>> {
-    let should_invert = Environment::should_invert_direction();
+static UNIT0: Mutex<RefCell<Option<unit::Unit<'static, 1>>>> = Mutex::new(RefCell::new(None));
+static CURRENT_POSITION: UnitPosition = UnitPosition::new(0);
 
-    let mut pcnt = PcntUnitDriver::new(&UnitConfig {
-        low_limit: PCNT_LOW_LIMIT,
-        high_limit: PCNT_HIGH_LIMIT,
-        intr_priority: 0,
-        accum_count: false,
-        ..Default::default()
-    })?;
+#[ram]
+#[esp_hal::handler(priority = Priority::Priority2)]
+fn interrupt_handler() {
+    critical_section::with(|cs| {
+        let mut u0 = UNIT0.borrow_ref_mut(cs);
+        if let Some(u0) = u0.as_mut() {
+            if !u0.interrupt_is_set() {
+                return;
+            }
 
-    pcnt.add_channel(
-        step_pin,
-        dir_pin,
-        &ChannelConfig {
-            invert_edge_input: false,
-            invert_level_input: should_invert,
-            virt_edge_io_level: false,
-            virt_level_io_level: false,
-            ..Default::default()
-        },
-    )?
-    // when signal goes from low to high, increase counter, but do nothing when it goes back to low
-    .set_edge_action(ChannelEdgeAction::Increase, ChannelEdgeAction::Hold)?
-    .set_level_action(ChannelLevelAction::Inverse, ChannelLevelAction::Keep)?;
+            let events = u0.events();
+            if events.high_limit {
+                CURRENT_POSITION.add_assign(PCNT_HIGH_LIMIT as isize);
+            } else if events.low_limit {
+                CURRENT_POSITION.add_assign(PCNT_LOW_LIMIT as isize);
+            }
 
-    pcnt.set_glitch_filter(Some(&GlitchFilterConfig {
-        max_glitch: Duration::from_nanos(2000), // 2us is the minimum pulse width generated
-        ..Default::default()
-    }))?;
-
-    // TODO: It could use accum_count here, should be faster
-    pcnt.subscribe(move |event| {
-        let watch_point = event.watch_point_value;
-        if watch_point == PCNT_HIGH_LIMIT || watch_point == PCNT_LOW_LIMIT {
-            // reached limit -> will reset to 0 afterwards
-            current_position.add_assign(watch_point as isize);
+            u0.reset_interrupt();
         }
-    })?;
+    });
+}
 
-    pcnt.enable()?;
+fn access_pcnt_unit<T>(f: impl FnOnce(&mut unit::Unit<'_, 1>) -> T) -> T {
+    critical_section::with(|cs| f((*UNIT0.borrow_ref_mut(cs)).as_mut().unwrap()))
+}
 
-    for point in [PCNT_LOW_LIMIT, PCNT_HIGH_LIMIT] {
-        pcnt.add_watch_point(point)?;
+fn build_pcnt<'d, const U: usize>(
+    unit: &Unit<'d, U>,
+    step_pin: Option<impl PeripheralInput<'d>>,
+    dir_pin: Option<impl PeripheralInput<'d>>,
+) -> anyhow::Result<()> {
+    unit.set_low_limit(Some(PCNT_LOW_LIMIT)).unwrap();
+    unit.set_high_limit(Some(PCNT_HIGH_LIMIT)).unwrap();
+    let max_glitch_ns = 2000;
+    // TODO: upstream this to esp-hal
+    unit.set_filter(Some(
+        (Clocks::get().apb_clock.as_hz() / 1_000_000 * max_glitch_ns / 1_000) as u16,
+    ))
+    .unwrap();
+    unit.clear();
+
+    let channel = &unit.channel0;
+
+    // When the dir_pin is high, reverse the counting direction, and when low, keep it
+    channel.set_ctrl_mode(CtrlMode::Keep, CtrlMode::Reverse);
+    if let Some(dir_pin) = dir_pin {
+        channel.set_ctrl_signal(dir_pin);
     }
-    pcnt.clear_count()?;
-    pcnt.start()?;
 
-    Ok(pcnt)
+    // when signal goes from low to high, increase counter, but do nothing when it goes back to low
+    channel.set_input_mode(EdgeMode::Hold, EdgeMode::Increment);
+    if let Some(step_pin) = step_pin {
+        channel.set_edge_signal(step_pin);
+    }
+
+    unit.clear();
+    unit.listen();
+    unit.resume();
+
+    Ok(())
 }
 
 impl<'d> StepperController<'d> {
-    pub fn new<UART: esp_idf_hal::uart::Uart + 'd>(
-        uart: UART,
-        step_pin: impl InputPin + OutputPin + 'd,
-        dir_pin: impl InputPin + OutputPin + 'd,
-        storage: &Storage,
-        tx: impl OutputPin + 'd,
-        rx: impl InputPin + 'd,
-        enable_pin: impl InputPin + OutputPin + 'd,
+    pub async fn new(
+        rmt: RMT<'d>,
+        pcnt: PCNT<'static>,
+        uart: impl UartInstance + 'static,
+        mut step_pin: Flex<'d>,
+        mut dir_pin: Flex<'d>,
+        storage: &Storage<'_>,
+        tx: AnyPin<'static>,
+        rx: AnyPin<'static>,
+        enable_pin: Output<'d>,
     ) -> anyhow::Result<Self> {
-        let storage_position = storage.current_position()?;
+        let storage_position = storage.current_position().await?;
         let has_position = storage_position.is_some();
-        let current_position = storage_position.unwrap_or(UnitPosition::new(usize::MAX / 2));
+        CURRENT_POSITION.set(&storage_position.unwrap_or(UnitPosition::new(usize::MAX / 2)));
+        let current_position = &CURRENT_POSITION;
 
-        let max_position = storage.max_position()?.unwrap_or(UnitPosition::max());
+        let max_position = storage.max_position().await?.unwrap_or(UnitPosition::max());
 
         // We need to split the pins into input and output pins,
         // the inputs are used by the PCNT to track the position
         // and the step output pin is used by the RMT peripheral
         // to drive the stepper motor.
 
-        let (step_in, step_out) = split_pin(step_pin, Pull::Down)?;
+        step_pin.set_output_enable(true);
+        step_pin.apply_output_config(&OutputConfig::default().with_pull(esp_hal::gpio::Pull::Down));
+        step_pin.set_level(Level::Low);
 
-        // The dir_out pin will be driven manually through the PinDriver -> it has to be used like this
-        let dir_out = PinDriver::input_output(dir_pin, Pull::Down)?;
-        let dir_in = unsafe { AnyInputPin::steal(dir_out.pin()) };
+        let (step_in, step_out) = unsafe { step_pin.split_into_drivers() };
 
-        let current_position = Arc::new(current_position);
+        dir_pin.set_output_enable(true);
+        dir_pin.apply_output_config(&Default::default());
+
+        let (dir_in, dir_out) = unsafe { dir_pin.split_into_drivers() };
+
+        let mut dir_in: InputSignal = dir_in.into();
+        if Environment::should_invert_direction() {
+            dir_in = dir_in.with_input_inverter(true);
+        }
+
+        let tx_driver = TxDriver::new(
+            rmt,
+            step_out,
+            Rate::from_mhz(16),
+            TxChannelConfig::default()
+                .with_clk_divider(1)
+                .with_idle_output_level(Level::Low)
+                .with_idle_output(true),
+        )?;
+
+        let mut pcnt = Pcnt::new(pcnt);
+        pcnt.set_interrupt_handler(interrupt_handler);
+
+        build_pcnt(&pcnt.unit1, Some(step_in), Some(dir_in))?;
+
+        critical_section::with(|cs| UNIT0.borrow_ref_mut(cs).replace(pcnt.unit1));
+
         Ok(Self {
-            current_position: current_position.clone(),
+            current_position,
             max_position,
             stepper_driver: StepperDriver::new(
                 Environment::uart_baud_rate(),
@@ -209,8 +253,7 @@ impl<'d> StepperController<'d> {
                 enable_pin,
             )?,
             target: None,
-            pcnt: build_pcnt(Some(step_in), Some(dir_in), current_position)?,
-            tx_driver: CustomTxChannelDriver::new(step_out)?,
+            tx_driver,
             dir_pin: dir_out,
             has_position,
         })
@@ -245,7 +288,7 @@ impl<'d> StepperController<'d> {
             return Ok(());
         };
 
-        assert!(self.is_moving() == false);
+        assert!(!self.is_moving());
 
         // Based on the current position, it will calculate the number of steps it has to move:
         let current_position = self.current_unit_position();
@@ -277,9 +320,9 @@ impl<'d> StepperController<'d> {
             (steps_to_move.signum() == -1) ^ Environment::should_invert_direction();
 
         if should_invert_direction {
-            self.dir_pin.set_high()?;
+            self.dir_pin.set_high();
         } else {
-            self.dir_pin.set_low()?;
+            self.dir_pin.set_low();
         }
 
         let steps_to_move = steps_to_move.unsigned_abs();
@@ -287,11 +330,10 @@ impl<'d> StepperController<'d> {
 
         let movement_config = Environment::resolve_movement_config();
 
-        let rpm = movement_config.max_rounds_per_second as f64 * 60.0;
+        let rpm = movement_config.max_rounds_per_second * 60.0;
         let microsteps_per_step = movement_config.microsteps_per_step as f64;
         let steps_per_revolution = movement_config.full_steps_per_rotation as f64;
 
-        // TODO: Why not use PulseTicks here?
         // Calculate period in nanoseconds for higher precision with RMT ticks
         // 1s = 1_000_000_000ns
         let period_ns = (60.0 * 1_000_000_000.0
@@ -308,16 +350,21 @@ impl<'d> StepperController<'d> {
             2_000 // Minimum delay if period is very short
         };
 
-        let ticks_hz = self.tx_driver.resolution(); // Get the actual RMT counter clock frequency
-        let ns_per_tick = 1_000_000_000u64 / ticks_hz.0 as u64;
+        let ticks_hz = self.tx_driver.get_resolution(); // Get the actual RMT counter clock frequency
+        let ns_per_tick = 1_000_000_000u64 / ticks_hz.as_hz() as u64;
 
-        let high_ticks = PulseTicks::new((pulse_width_ns as u64 / ns_per_tick) as u16)?;
-        let low_ticks = PulseTicks::new((delay_ns as u64 / ns_per_tick) as u16)?;
-
-        let signal = &[Symbol::new(
-            Pulse::new(PinState::High, high_ticks),
-            Pulse::new(PinState::Low, low_ticks),
+        let signal = &[PulseCode::new(
+            Level::High,
+            (pulse_width_ns as u64 / ns_per_tick) as u16,
+            Level::Low,
+            (delay_ns as u64 / ns_per_tick) as u16,
         )];
+
+        log::info!(
+            "Moving with high_length={} ticks, low_length={} ticks",
+            (pulse_width_ns as u64 / ns_per_tick) as u16,
+            (delay_ns as u64 / ns_per_tick) as u16,
+        );
 
         assert!(
             steps_to_move <= u32::MAX as u64,
@@ -325,18 +372,9 @@ impl<'d> StepperController<'d> {
         );
 
         // First ensure that there is no pending movement:
-        self.tx_driver.disable()?;
+        self.tx_driver.stop_wait().await?;
 
-        self.tx_driver
-            .start_send(
-                signal,
-                &TransmitConfig {
-                    loop_count: Loop::Count(steps_to_move as u32),
-                    queue_non_blocking: true,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        self.tx_driver.send(signal, Some(steps_to_move as usize))?;
 
         self.target = Some(target);
 
@@ -377,7 +415,7 @@ impl<'d> StepperController<'d> {
 
     /// Returns true if the stepper motor is currently moving.
     pub fn is_moving(&self) -> bool {
-        self.target.is_some() && &self.target != &Some(self.current_unit_position())
+        self.target.is_some() && self.target != Some(self.current_unit_position())
     }
 
     pub fn driver(&mut self) -> &mut StepperDriver<'d> {
@@ -387,8 +425,8 @@ impl<'d> StepperController<'d> {
     fn current_unit_position(&self) -> UnitPosition {
         // current_position only contains the overflow values,
         // the pcnt contains the remaining steps:
-        let result = (*self.current_position).clone();
-        let pcnt_count = self.pcnt.get_count().unwrap();
+        let result = self.current_position.clone();
+        let pcnt_count = access_pcnt_unit(|unit| unit.value());
         result.add_assign(pcnt_count as isize);
 
         result
@@ -420,10 +458,9 @@ impl<'d> StepperController<'d> {
         );
 
         // This will cancel all pending step movements:
-        self.tx_driver
-            .disable()
-            .expect("Failed to stop RMT transmission");
+        self.tx_driver.stop_wait().await?;
 
+        log::info!("Updating internal position after stop");
         // Update the target position to None to indicate that we are not moving anymore:
         self.internal_update_target_position(None).await?;
 
@@ -437,24 +474,26 @@ impl<'d> StepperController<'d> {
     }
 
     /// Resets the current position to 0.
-    pub async fn reset_start_position(&mut self, storage: &Storage) -> anyhow::Result<()> {
+    pub async fn reset_start_position(&mut self, storage: &Storage<'_>) -> anyhow::Result<()> {
         self.stop().await?;
 
         // The current position will be set to 0:
         self.current_position.set(&UnitPosition::new(0));
-        self.pcnt.clear_count()?;
+        access_pcnt_unit(|unit| unit.clear());
         self.has_position = true;
-        self.store(storage)?;
+        self.store(storage).await?;
+
+        log::info!("Updated position to {}", self.current_unit_position());
 
         Ok(())
     }
 
-    pub async fn reset_max_position(&mut self, storage: &Storage) -> anyhow::Result<()> {
+    pub async fn reset_max_position(&mut self, storage: &Storage<'_>) -> anyhow::Result<()> {
         self.stop().await?;
 
         // The max will be set to the current position:
         self.max_position.set(&self.current_unit_position());
-        self.store(storage)?;
+        self.store(storage).await?;
         log::info!(
             "Set max position to {}, currently at {}",
             self.max_position,
@@ -464,13 +503,15 @@ impl<'d> StepperController<'d> {
         Ok(())
     }
 
-    pub fn store(&self, storage: &Storage) -> anyhow::Result<()> {
+    pub async fn store(&self, storage: &Storage<'_>) -> anyhow::Result<()> {
         if self.has_max_position() {
-            storage.set_max_position(self.max_position.clone())?;
+            storage.set_max_position(self.max_position.clone()).await?;
         }
 
         if self.has_position() {
-            storage.set_current_position(self.current_unit_position())?;
+            storage
+                .set_current_position(self.current_unit_position())
+                .await?;
         }
 
         Ok(())

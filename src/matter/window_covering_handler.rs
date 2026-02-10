@@ -1,12 +1,10 @@
+use alloc::sync::Arc;
 use core::cell::Cell;
-use std::sync::Arc;
 
-use esp_idf_svc::sys::EspError;
-
-use rs_matter::dm::{Cluster, Dataver};
-use rs_matter::error::ErrorCode;
-use rs_matter::reexport::bitflags;
-use rs_matter::{import, with};
+use rs_matter_embassy::matter::dm::{Cluster, Dataver};
+use rs_matter_embassy::matter::error::ErrorCode;
+use rs_matter_embassy::matter::reexport::bitflags;
+use rs_matter_embassy::matter::{import, with};
 
 use window_covering::{
     ConfigStatus, EndProductType, GoToLiftPercentageRequest, GoToLiftValueRequest,
@@ -14,10 +12,10 @@ use window_covering::{
     OperationalStatus as MatterOperationalStatus, SafetyStatus, Type,
 };
 
+use crate::EmbassyMutex;
 use crate::matter::Position;
 use crate::movement::StepperController;
 use crate::storage::Storage;
-use crate::EmbassyMutex;
 
 import!(WindowCovering);
 
@@ -54,7 +52,7 @@ pub struct WindowCoveringHandler {
     dataver: Dataver,
     mode: Cell<Mode>,
     controller: Arc<EmbassyMutex<StepperController<'static>>>,
-    storage: Arc<Storage>,
+    storage: Storage<'static>,
 }
 
 impl WindowCoveringHandler {
@@ -62,14 +60,14 @@ impl WindowCoveringHandler {
     pub fn new(
         dataver: Dataver,
         controller: Arc<EmbassyMutex<StepperController<'static>>>,
-        storage: Arc<Storage>,
-    ) -> Result<Self, EspError> {
-        Ok(Self {
+        storage: Storage<'static>,
+    ) -> Self {
+        Self {
             dataver,
             mode: Cell::new(Mode::empty()),
             controller,
             storage,
-        })
+        }
     }
 
     /// Adapt the handler instance to the generic `rs-matter` `AsyncHandler` trait
@@ -77,13 +75,19 @@ impl WindowCoveringHandler {
         window_covering::HandlerAsyncAdaptor(self)
     }
 
-    pub fn number_of_actuations_lift(&self) -> u16 {
-        self.storage.number_of_actuations().unwrap().unwrap_or(0)
+    pub async fn number_of_actuations_lift(&self) -> u16 {
+        self.storage
+            .number_of_actuations()
+            .await
+            .unwrap()
+            .unwrap_or(0)
     }
 
-    pub fn increment_number_of_actuations_lift(&self) {
+    pub async fn increment_number_of_actuations_lift(&self) {
+        let actuations = self.number_of_actuations_lift().await;
         self.storage
-            .set_number_of_actuations(self.number_of_actuations_lift() + 1)
+            .set_number_of_actuations(actuations + 1)
+            .await
             .unwrap();
     }
 
@@ -103,7 +107,7 @@ impl WindowCoveringHandler {
             "Updating target position from {:?} to Some({position:?})",
             self.target_position().await
         );
-        self.increment_number_of_actuations_lift();
+        self.increment_number_of_actuations_lift().await;
 
         self.controller
             .lock()
@@ -111,18 +115,30 @@ impl WindowCoveringHandler {
             .update_target_position(Some(position))
             .await
             .map_err(|err| {
-                rs_matter::error::Error::new_with_details(
-                    ErrorCode::StdIoError,
-                    err.into_boxed_dyn_error(),
-                )
+                log::error!("An error occurred while setting target position: {err}");
+                rs_matter::error::Error::new(ErrorCode::StdIoError)
             })?;
 
         Ok(())
     }
 }
 
-// TODO: see https://csa-iot.org/wp-content/uploads/2024/11/24-27350-005_Matter-1.4-Application-Cluster-Specification.pdf
-// In Section 5.3
+pub trait FloatExt {
+    fn round(self) -> Self;
+
+    fn floor(self) -> Self;
+}
+
+impl FloatExt for f64 {
+    fn round(self) -> Self {
+        (self + 0.5).floor()
+    }
+
+    fn floor(self) -> Self {
+        self - (self % 1.0)
+    }
+}
+
 impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
     /// The metadata cluster definition corresponding to the handler
     const CLUSTER: Cluster<'static> = window_covering::FULL_CLUSTER
@@ -155,7 +171,6 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
                 | window_covering::AttributeId::SafetyStatus
                 | window_covering::AttributeId::GeneratedCommandList
                 | window_covering::AttributeId::AcceptedCommandList
-                | window_covering::AttributeId::EventList
                 | window_covering::AttributeId::AttributeList
                 | window_covering::AttributeId::FeatureMap
                 | window_covering::AttributeId::ClusterRevision
@@ -189,7 +204,7 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
         &self,
         _ctx: impl rs_matter::dm::ReadContext,
     ) -> Result<u16, rs_matter::error::Error> {
-        Ok(self.number_of_actuations_lift())
+        Ok(self.number_of_actuations_lift().await)
     }
 
     /// This attribute specifies the configuration and status information of the window covering.
@@ -246,10 +261,7 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
             .await
             .map(|pos| pos.map_to(POSITION_100THS_MAX as f64) as u16);
 
-        log::info!(
-            "Requested current position lift percent 100ths: {:?}",
-            result
-        );
+        log::info!("Requested current position lift percent 100ths: {result:?}");
 
         Ok(result.into())
     }
@@ -263,10 +275,7 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
             .await
             .map(|pos| pos.map_to(POSITION_100THS_MAX as f64) as u16);
 
-        log::info!(
-            "Requested target position lift percent 100ths: {:?}",
-            result
-        );
+        log::info!("Requested target position lift percent 100ths: {result:?}");
 
         Ok(result.into())
     }
@@ -292,10 +301,7 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
             }
             (None, Some(target)) => {
                 // Position is unknown, but there is a target position?
-                log::error!(
-                    "Current position is None, but target position is Some({:?})",
-                    target
-                );
+                log::error!("Current position is None, but target position is Some({target:?})");
 
                 // TODO: decide how to handle this case
             }
@@ -350,7 +356,7 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
         _ctx: impl rs_matter::dm::WriteContext,
         value: Mode,
     ) -> Result<(), rs_matter::error::Error> {
-        log::info!("Setting mode: {:?}", value);
+        log::info!("Setting mode: {value:?}");
         self.mode.set(value);
         Ok(())
     }
@@ -381,10 +387,8 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
 
         // This command will stop the current motion of the window covering, if any.
         self.controller.lock().await.stop().await.map_err(|err| {
-            rs_matter::error::Error::new_with_details(
-                ErrorCode::StdIoError,
-                err.into_boxed_dyn_error(),
-            )
+            log::error!("An error occurred while stopping motion: {err}");
+            rs_matter::error::Error::new(ErrorCode::StdIoError)
         })?;
 
         Ok(())

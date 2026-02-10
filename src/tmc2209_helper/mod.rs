@@ -86,6 +86,10 @@ pub enum TmcError {
     InvalidCrc([u8; ReadResponse::LEN_BYTES]),
     #[error("Expected address {expected} but received {received}")]
     UnexpectedAddress { expected: u8, received: u8 },
+    #[error("Failed read from driver: {0}")]
+    ReadError(esp_hal::uart::RxError),
+    #[error("Failed write from driver: {0}")]
+    WriteError(esp_hal::uart::TxError),
 }
 
 impl<E: embedded_io::Error> From<E> for TmcError {

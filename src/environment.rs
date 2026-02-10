@@ -1,5 +1,5 @@
 use const_dotenvy::dotenvy;
-use esp_idf_hal::units::Hertz;
+use esp_hal::time::Rate;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MovementConfig {
@@ -11,6 +11,14 @@ pub struct MovementConfig {
 pub struct Environment {}
 
 impl Environment {
+    pub const fn matter_seed() -> u32 {
+        dotenvy!(MATTER_RANDOM_NUMBER_SEED: u32)
+    }
+
+    pub const fn matter_serial_number() -> &'static str {
+        dotenvy!(MATTER_SERIAL_NUMBER: &str)
+    }
+
     pub const fn enable_stealth_chop() -> bool {
         dotenvy!(ENABLE_STEALTH_CHOP: bool = false)
     }
@@ -23,28 +31,28 @@ impl Environment {
         dotenvy!(INVERT_DIRECTION: bool = false)
     }
 
-    pub const fn uart_tx_pin() -> usize {
-        dotenvy!(TX_PIN: usize)
+    pub const fn uart_tx_pin() -> u8 {
+        dotenvy!(TX_PIN: u8)
     }
 
-    pub const fn uart_rx_pin() -> usize {
-        dotenvy!(RX_PIN: usize)
+    pub const fn uart_rx_pin() -> u8 {
+        dotenvy!(RX_PIN: u8)
     }
 
-    pub const fn enable_pin() -> usize {
-        dotenvy!(EN_PIN: usize)
+    pub const fn enable_pin() -> u8 {
+        dotenvy!(EN_PIN: u8)
     }
 
-    pub const fn step_pin() -> usize {
-        dotenvy!(STEP_PIN: usize)
+    pub const fn step_pin() -> u8 {
+        dotenvy!(STEP_PIN: u8)
     }
 
-    pub const fn dir_pin() -> usize {
-        dotenvy!(DIR_PIN: usize)
+    pub const fn dir_pin() -> u8 {
+        dotenvy!(DIR_PIN: u8)
     }
 
-    pub const fn uart_baud_rate() -> Hertz {
-        Hertz(dotenvy!(UART_BAUD_RATE: u32 = 115_200))
+    pub const fn uart_baud_rate() -> Rate {
+        Rate::from_hz(dotenvy!(UART_BAUD_RATE: u32 = 115_200))
     }
 
     pub const fn reset_matter_duration() -> u64 {
@@ -55,29 +63,25 @@ impl Environment {
         dotenvy!(RESET_POSITIONS_DURATION: u64 = u64::MAX)
     }
 
-    pub const fn led_pin() -> usize {
-        dotenvy!(LED_PIN: usize)
+    pub const fn led_pin() -> u8 {
+        dotenvy!(LED_PIN: u8)
     }
 
-    pub const fn led2_pin() -> Option<usize> {
-        let pin = dotenvy!(LED2_PIN: usize = 0);
-        if pin == 0 {
-            None
-        } else {
-            Some(pin)
-        }
+    pub const fn led2_pin() -> Option<u8> {
+        let pin = dotenvy!(LED2_PIN: u8 = 0);
+        if pin == 0 { None } else { Some(pin) }
     }
 
-    pub const fn up_button_pin() -> usize {
-        dotenvy!(UP_BUTTON_PIN: usize)
+    pub const fn up_button_pin() -> u8 {
+        dotenvy!(UP_BUTTON_PIN: u8)
     }
 
-    pub const fn down_button_pin() -> usize {
-        dotenvy!(DOWN_BUTTON_PIN: usize)
+    pub const fn down_button_pin() -> u8 {
+        dotenvy!(DOWN_BUTTON_PIN: u8)
     }
 
-    pub const fn pause_button_pin() -> usize {
-        dotenvy!(PAUSE_BUTTON_PIN: usize)
+    pub const fn pause_button_pin() -> u8 {
+        dotenvy!(PAUSE_BUTTON_PIN: u8)
     }
 
     pub const fn resolve_movement_config() -> MovementConfig {

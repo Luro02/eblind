@@ -1,16 +1,16 @@
-use core::time::Duration;
-
 use embassy_sync::watch::Watch;
-use esp_idf_hal::gpio::{AnyIOPin, OutputPin};
-use esp_idf_hal::spi::config::{Config, DriverConfig};
-use esp_idf_hal::spi::{SpiAnyPins, SpiBusDriver, SpiDriver, SpiError};
-use esp_idf_hal::units::FromValueType;
-use esp_idf_svc::sys::EspError;
-use smart_leds::{SmartLedsWrite, RGB8};
+use embassy_time::Duration;
+use esp_hal::Blocking;
+use esp_hal::time::Rate;
+use smart_leds::{RGB8, SmartLedsWrite};
 use ws2812_spi::Ws2812;
 
-use crate::utils::{yield_for, yield_now};
+use esp_hal::gpio::interconnect::PeripheralOutput;
+use esp_hal::spi::Error as SpiError;
+use esp_hal::spi::master::{Config as SpiConfig, Instance as SpiInstance, Spi};
+
 use crate::EmbassyWatch;
+use crate::utils::{yield_for, yield_now};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedTarget {
@@ -27,13 +27,6 @@ impl LedTarget {
 
     pub const fn is_repeating(&self) -> bool {
         matches!(self, Self::Blink { .. })
-    }
-
-    pub fn color(&self) -> RGB8 {
-        match self {
-            Self::Blink { color, .. } => *color,
-            Self::Solid { color } => *color,
-        }
     }
 }
 
@@ -77,26 +70,26 @@ pub async fn led_task(mut led_controller: LedController<'static>) {
 }
 
 pub struct LedController<'d> {
-    led: Ws2812<SpiBusDriver<'d, SpiDriver<'d>>>,
+    led: Ws2812<Spi<'d, Blocking>>,
 }
 
 impl<'d> LedController<'d> {
+    const LED_FREQUENCY: Rate = Rate::from_mhz(3);
+
     /// Creates a new LED controller, controlling the LEDs connected to the given pin.
     ///
     /// The SPI bus will be used to generate the pwm signal for the LEDs.
-    pub fn new<SPI>(spi: SPI, pin: impl OutputPin + 'd) -> Result<Self, EspError>
-    where
-        SPI: SpiAnyPins + 'static,
-    {
-        let bus_config = DriverConfig::default();
-        let config = Config::default().baudrate(3.MHz().into());
+    pub fn new(spi: impl SpiInstance + 'd, pin: impl PeripheralOutput<'d>) -> Self {
+        let spi = Spi::new(
+            spi,
+            SpiConfig::default().with_frequency(Self::LED_FREQUENCY),
+        )
+        .expect("Failed to create SPI for LED controller")
+        .with_mosi(pin);
 
-        let spi_driver = SpiDriver::new_without_sclk(spi, pin, AnyIOPin::none(), &bus_config)?;
-        let spi_bus_driver = SpiBusDriver::new(spi_driver, &config)?;
-
-        Ok(Self {
-            led: Ws2812::new(spi_bus_driver),
-        })
+        Self {
+            led: Ws2812::new(spi),
+        }
     }
 
     /// Writes the given colors to the LED strip.
