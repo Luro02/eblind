@@ -90,7 +90,7 @@ impl RawChannel<Tx> {
 
     /// Resets asserted interrupts.
     ///
-    /// ### Note
+    /// # Note
     ///
     /// After an interrupt handler has been invoked, the interrupt handler must clear
     /// the interrupt status (through this function) to avoid being invoked again for
@@ -189,6 +189,8 @@ pub struct StateMachine<'a, Dir: Direction> {
     _marker: PhantomData<(&'a (), Dir)>,
 }
 
+/// Represents the memory buffer of an RMT channel, which is used to hold the
+/// data to be transmitted or received.
 #[derive(Debug)]
 pub struct Memory<'a> {
     buffer: &'a mut [PulseCode],
@@ -240,22 +242,16 @@ impl<'a> StateMachine<'a, Tx> {
     #[inline]
     pub fn reset_ptr(&mut self) {
         let rmt = RMT::regs();
+
         rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
             w.mem_rd_rst().set_bit();
-            w
-        });
-        rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
+            w.apb_mem_rst().set_bit();
+            w.apb_mem_rst().clear_bit();
             w.mem_rd_rst().clear_bit();
             w
         });
-        rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
-            w.apb_mem_rst().set_bit();
-            w
-        });
-        rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
-            w.apb_mem_rst().clear_bit();
-            w
-        });
+
+        self.update();
     }
 
     /// Reset the current loop count of the state machine to zero.
@@ -280,9 +276,7 @@ impl<'a> StateMachine<'a, Tx> {
             .modify(|_, w| unsafe { w.tx_loop_num().bits(loop_count as u16) });
     }
 
-    // TODO: The esp-hal version has a dedicated update method that has to be manually called, instead of having the
-    //       setters call it automatically. Might be better for performance?
-    pub fn update(self) {
+    pub fn update(&mut self) {
         let rmt = RMT::regs();
 
         rmt.ch_tx_conf0(self.channel as usize)
@@ -292,10 +286,10 @@ impl<'a> StateMachine<'a, Tx> {
     pub fn stop(&mut self) {
         let rmt = RMT::regs();
 
-        rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
-            w.conf_update().bit(true);
-            w.tx_stop().bit(true)
-        });
+        rmt.ch_tx_conf0(self.channel as usize)
+            .modify(|_, w| w.tx_stop().bit(true));
+
+        self.update();
     }
 
     /// Start the state machine.
@@ -304,9 +298,10 @@ impl<'a> StateMachine<'a, Tx> {
         let rmt = RMT::regs();
 
         rmt.ch_tx_conf0(self.channel as usize).modify(|_, w| {
-            w.conf_update().bit(true);
             w.tx_start().bit(true);
             w
         });
+
+        self.update();
     }
 }
