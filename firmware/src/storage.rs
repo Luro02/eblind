@@ -53,7 +53,7 @@ impl<'d> FlashAccess<'d> {
         });
     }
 
-    pub async fn can_write(&self) -> bool {
+    pub fn can_write(&self) -> bool {
         critical_section::with(|cs| *self.can_write.borrow_ref_mut(cs))
     }
 }
@@ -226,7 +226,7 @@ impl<'d> Storage<'d> {
 
         for partition in partitions {
             let partition_name = partition.name();
-            log::info!("Erasing partition '{}'", partition_name);
+            log::info!("Erasing partition '{partition_name}'");
             let (offset, len) = choose_partition(&mut self.flash_access.clone(), partition_name)?;
 
             flash_access
@@ -236,7 +236,7 @@ impl<'d> Storage<'d> {
                 })?;
         }
 
-        log::info!("Flash Access: can_write={}", flash_access.can_write().await);
+        log::info!("Flash Access: can_write={}", flash_access.can_write());
         // Test storing and loading a value
         self.store("init", true).await?;
         debug_assert_eq!(self.load::<bool>("init").await?, Some(true));

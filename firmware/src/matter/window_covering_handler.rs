@@ -86,7 +86,7 @@ impl WindowCoveringHandler {
     pub async fn increment_number_of_actuations_lift(&self) {
         let actuations = self.number_of_actuations_lift().await;
         self.storage
-            .set_number_of_actuations(actuations + 1)
+            .set_number_of_actuations(actuations.saturating_add(1))
             .await
             .unwrap();
     }
@@ -303,7 +303,11 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
                 // Position is unknown, but there is a target position?
                 log::error!("Current position is None, but target position is Some({target:?})");
 
-                // TODO: decide how to handle this case
+                if target.is_opening(Position::new(0.5)) {
+                    status |= OperationalStatus::OPENING;
+                } else {
+                    status |= OperationalStatus::CLOSING;
+                }
             }
         }
 
@@ -365,6 +369,8 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
         &self,
         _ctx: impl rs_matter::dm::InvokeContext,
     ) -> Result<(), rs_matter::error::Error> {
+        log::info!("Called handle_up_or_open");
+
         self.set_target_position(Position::open()).await?;
 
         Ok(())
@@ -374,6 +380,8 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
         &self,
         _ctx: impl rs_matter::dm::InvokeContext,
     ) -> Result<(), rs_matter::error::Error> {
+        log::info!("Called handle_down_or_close");
+
         self.set_target_position(Position::closed()).await?;
 
         Ok(())
@@ -399,16 +407,19 @@ impl window_covering::ClusterAsyncHandler for WindowCoveringHandler {
         _ctx: impl rs_matter::dm::InvokeContext,
         request: GoToLiftPercentageRequest<'_>,
     ) -> Result<(), rs_matter::error::Error> {
-        self.set_target_position(Position::new(
+        let target = Position::new(
             request.lift_percent_100_ths_value()? as f64 / POSITION_100THS_MAX as f64,
-        ))
-        .await?;
+        );
+        log::info!(
+            "Handling Go To Lift Percentage command with percentage: {}_100ths, target position: {target:?}",
+            request.lift_percent_100_ths_value()?
+        );
 
-        Ok(())
+        self.set_target_position(target).await
     }
 
     // The below functions have to be implemented, but are not supported by this device,
-    // so they return the appropriate error code.
+    // -> they return the appropriate error code.
 
     async fn handle_go_to_lift_value(
         &self,

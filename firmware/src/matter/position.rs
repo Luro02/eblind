@@ -38,6 +38,10 @@ impl Position {
     /// Returns true if the target position is closer to fully open than the
     /// current position.
     pub const fn is_opening(&self, target_position: Self) -> bool {
+        // It is opening if (target - current) is negative, and closing if it is positive.
+        //
+        // target - current < 0
+        // <=> target < current
         self.position > target_position.position
     }
 
