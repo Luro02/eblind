@@ -24,8 +24,6 @@ use crate::movement::rmt::TxDriver;
 use crate::movement::stepper_driver::StepperDriver;
 use crate::storage::Storage;
 
-// TODO: UnitPosition can be simplified
-
 #[derive(Debug, Default)]
 pub struct UnitPosition {
     value: AtomicUsize,
@@ -120,7 +118,9 @@ pub struct StepperController<'d> {
     dir_pin: Output<'d>,
 }
 
-static UNIT0: Mutex<RefCell<Option<unit::Unit<'static, 1>>>> = Mutex::new(RefCell::new(None));
+const PCNT_UNIT_NUM: usize = 1;
+static UNIT0: Mutex<RefCell<Option<unit::Unit<'static, PCNT_UNIT_NUM>>>> =
+    Mutex::new(RefCell::new(None));
 static CURRENT_POSITION: UnitPosition = UnitPosition::new(0);
 
 #[ram]
@@ -145,7 +145,7 @@ fn interrupt_handler() {
     });
 }
 
-fn access_pcnt_unit<T>(f: impl FnOnce(&mut unit::Unit<'_, 1>) -> T) -> T {
+fn access_pcnt_unit<T>(f: impl FnOnce(&mut unit::Unit<'_, PCNT_UNIT_NUM>) -> T) -> T {
     critical_section::with(|cs| f((*UNIT0.borrow_ref_mut(cs)).as_mut().unwrap()))
 }
 
@@ -376,6 +376,20 @@ impl<'d> StepperController<'d> {
 
         self.tx_driver.send(signal, Some(steps_to_move as usize))?;
 
+        let duplicate_current_target = target.clone();
+        let duplicate_current_position = self.current_position;
+        self.tx_driver.on_finish(move || {
+            // current_position only contains the overflow values,
+            // the pcnt contains the remaining steps:
+            let result = duplicate_current_position.clone();
+            let pcnt_count = access_pcnt_unit(|unit| unit.value());
+            result.add_assign(pcnt_count as isize);
+
+            log::info!(
+                "Finished movement to {duplicate_current_target}, current position is {result}"
+            );
+        });
+
         self.target = Some(target);
 
         Ok(())
@@ -402,7 +416,7 @@ impl<'d> StepperController<'d> {
 
         // Make sure to stop the stepper motor if it is currently moving?:
         if self.is_moving() {
-            log::info!(
+            log::warn!(
                 "Stepper is currently moving from {} to {:?}, sending stop signal first.",
                 self.current_unit_position(),
                 &self.target
