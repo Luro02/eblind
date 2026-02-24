@@ -151,6 +151,32 @@ async fn process_button_event(
     }
 }
 
+async fn update_state_from_controller(
+    controller: Arc<EmbassyMutex<StepperController<'static>>>,
+    state: &mut State,
+) {
+    let controller = controller.lock().await;
+
+    if !controller.is_moving() {
+        *state = State::Idle;
+        return;
+    }
+
+    let current_position = controller.current_position();
+    let target_position = controller.target_position().await;
+
+    *state = match target_position {
+        None => State::Idle,
+        Some(target) => {
+            if current_position.is_opening(target) {
+                State::Direction(-1)
+            } else {
+                State::Direction(1)
+            }
+        }
+    };
+}
+
 #[embassy_executor::task]
 async fn process_button_events_task(
     controller: Arc<EmbassyMutex<StepperController<'static>>>,
@@ -162,6 +188,9 @@ async fn process_button_events_task(
 
     loop {
         Timer::after(Duration::from_millis(50)).await;
+
+        // Sync state with actual movement (e.g. motor moved via matter or finished moving)
+        update_state_from_controller(controller.clone(), &mut state).await;
 
         for button in buttons.iter_mut() {
             button.tick();
