@@ -34,6 +34,12 @@ pub struct StepperDriver<'d> {
 
 impl<'d> StepperDriver<'d> {
     /// Constructs a communication channel over UART with the stepper driver.
+    ///
+    /// ### Warning
+    ///
+    /// Do not use [`UART0`](esp_hal::uart::UART0), this one is used for logging over USB
+    /// and will cause issues, because the code does not handle unexpected data coming from
+    /// the driver.
     pub fn new(
         baudrate: Rate,
         uart: impl UartInstance + 'static,
@@ -46,12 +52,7 @@ impl<'d> StepperDriver<'d> {
             .with_parity(Parity::None)
             .with_stop_bits(StopBits::_1)
             .with_baudrate(baudrate.as_hz())
-            // TODO: For some reason the FIFO overflows...
-            // TODO: The 7 bytes won't save this, seems like we have to buffer more on our side or include an interrupt
             .with_rx(RxConfig::default().with_fifo_full_threshold(120));
-
-        // TODO: Old code had a timeout of 400ms, this got lost, because the old wrapper is no longer used
-        //let uart = BufferedUart::new(Uart::new(uart, config)?.with_tx(tx).with_rx(rx));
 
         let uart = Uart::new(uart, config)?
             .with_tx(tx)
@@ -168,6 +169,11 @@ impl<'d> StepperDriver<'d> {
                 reg.set_pwm_autoscale(true);
                 reg.set_pwm_autograd(true);
                 reg.set_freewheel(StandstillMode::Freewheeling);
+            })
+            .await?;
+
+            self.update_register(|reg: &mut reg::TPWMTHRS| {
+                reg.0 = 0; // 0 = threshold disabled, StealthChop always active with en_spread_cycle=false
             })
             .await?;
 
